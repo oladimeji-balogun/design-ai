@@ -17,6 +17,42 @@ Secondary goal: use ChatGPT for general AI chat and for prototyping micro-intera
   - Plugin server: `http://localhost:4400`
   - WebSocket bridge: `ws://localhost:4402`
 
+## 2a. Architecture Decision (added post-planning): shared VPS over per-machine
+
+The original plan (below) sequenced a local, per-machine MCP setup first, with a
+shared/remote service flagged only as a future "if it becomes a priority" step. The
+team decided to go straight to the shared service. This section records that decision
+and its tradeoffs. The local setup remains valid for quick individual experiments, but
+the target is the shared stack.
+
+What we decided:
+
+- A second, self-hosted Penpot instance runs on our own VPS, alongside the official
+  Penpot MCP server, in a single Docker Compose stack. The existing Penpot on Elestio
+  (managed) stays as-is; it does not cleanly allow adding an MCP sidecar, which is why
+  we stand up our own.
+- Access is over Tailscale (VPN), not a public reverse proxy. The MCP bridge lets an
+  AI agent execute arbitrary code in the Penpot plugin environment. For a small pilot,
+  keeping that off the public internet is the biggest single risk reduction. A public
+  proxy with TLS and auth is the documented path if we later need access for people
+  who cannot join the tailnet.
+- Multi-user mode is on from day one (`MULTI_USER=true`), so the designer and a tester
+  can prompt concurrently. This also auto-enables remote mode (no server-side local
+  filesystem access).
+- Penpot must be >= 2.13.1, the first release that shipped MCP. The MCP server image
+  tag must match the Penpot version.
+
+What did not change: each designer still loads the plugin in their own browser and
+keeps the tab active during a session. Hosting removes the per-laptop Node install, not
+the browser step, that is inherent to how Penpot exposes design operations.
+
+Deployment config and the full deploy guide live in [`infra/`](./infra/README.md).
+
+Still to confirm before relying on it in production (tracked honestly, not assumed):
+the MCP container image source, whether single-instance multi-user needs external
+Redis, and the exact plugin manifest URL for the hosted Penpot version. See the
+"Unverified" section of the infra README.
+
 ## 3. Target Architecture
 
 ```
