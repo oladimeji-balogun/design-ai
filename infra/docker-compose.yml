@@ -1,0 +1,131 @@
+# self-hosted penpot + penpot mcp bridge, single vps, single internal network.
+#
+# reachability is handled by tailscale at the host level, not by this stack.
+# services bind to 127.0.0.1 on the host so nothing is exposed publicly; the
+# tailscale interface is what team members use to reach the box. see infra/README.md.
+#
+# topology:
+#   penpot-frontend  -> ui, reverse-proxies to backend/exporter
+#   penpot-backend   -> api
+#   penpot-exporter  -> render/export service
+#   penpot-postgres  -> penpot's database
+#   penpot-redis     -> penpot's own cache/queue
+#   penpot-mcp-server-> mcp bridge in multi-user mode (4401 http, 4402 websocket)
+#
+# note: the plugin side is not a container. each designer loads the plugin into
+# their own browser from penpot; this stack only runs the server it connects to.
+
+networks:
+  penpot:
+    driver: bridge
+
+volumes:
+  penpot_postgres_data:
+  penpot_assets_data:
+
+services:
+  penpot-frontend:
+    image: penpotapp/frontend:latest
+    restart: always
+    # bind to localhost only. tailscale (host) is the access path, not public 0.0.0.0.
+    ports:
+      - "127.0.0.1:9001:8080"
+    volumes:
+      - penpot_assets_data:/opt/data/assets
+    depends_on:
+      - penpot-backend
+      - penpot-exporter
+    networks:
+      - penpot
+    environment:
+      PENPOT_FLAGS: "$PENPOT_FLAGS"
+
+  penpot-backend:
+    image: penpotapp/backend:latest
+    restart: always
+    volumes:
+      - penpot_assets_data:/opt/data/assets
+    depends_on:
+      - penpot-postgres
+      - penpot-redis
+    networks:
+      - penpot
+    environment:
+      PENPOT_FLAGS: "$PENPOT_FLAGS"
+      PENPOT_SECRET_KEY: "$PENPOT_SECRET_KEY"
+      PENPOT_PUBLIC_URI: "$PENPOT_PUBLIC_URI"
+      PENPOT_DATABASE_URI: "postgresql://penpot-postgres/penpot"
+      PENPOT_DATABASE_USERNAME: "$PENPOT_DATABASE_USERNAME"
+      PENPOT_DATABASE_PASSWORD: "$PENPOT_DATABASE_PASSWORD"
+      PENPOT_REDIS_URI: "redis://penpot-redis/0"
+      PENPOT_ASSETS_STORAGE_BACKEND: "assets-fs"
+      PENPOT_STORAGE_ASSETS_FS_DIRECTORY: "/opt/data/assets"
+      PENPOT_TELEMETRY_ENABLED: "false"
+
+  penpot-exporter:
+    image: penpotapp/exporter:latest
+    restart: always
+    networks:
+      - penpot
+    environment:
+      PENPOT_PUBLIC_URI: "http://penpot-frontend:8080"
+      PENPOT_REDIS_URI: "redis://penpot-redis/0"
+
+  penpot-postgres:
+    image: postgres:15
+    restart: always
+    stop_signal: SIGINT
+    volumes:
+      - penpot_postgres_data:/var/lib/postgresql/data
+    networks:
+      - penpot
+    environment:
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      POSTGRES_DB: "penpot"
+      POSTGRES_USER: "$PENPOT_DATABASE_USERNAME"
+      POSTGRES_PASSWORD: "$PENPOT_DATABASE_PASSWORD"
+
+  penpot-redis:
+    image: redis:7
+    restart: always
+    networks:
+      - penpot
+
+  # the mcp bridge. this is the official penpot mcp server, packaged as a docker
+  # image built from the penpot/penpot source (mcp/ dir). we do not run it via a
+  # raw `npx` in a bare node image, that is not a proven container entrypoint.
+  #
+  # the image tag MUST match the penpot version, and penpot must be >= 2.13.1
+  # (the first release that shipped mcp). pin PENPOT_MCP_IMAGE_TAG in .env.
+  #
+  # exposes 4401 (http/mcp for the ai client) and 4402 (websocket for the browser
+  # plugin bridge). there is no separate "plugin server" container, the plugin
+  # side lives in penpot itself, loaded into the designer's browser.
+  #
+  # MULTI_USER=true enables multiple simultaneous sessions and auto-enables remote
+  # mode (which disables local filesystem access). this is what gives the designer
+  # and a tester day-one concurrency.
+  #
+  # bound to 127.0.0.1 on the host so nothing is exposed publicly; tailscale is the
+  # access path. see infra/README.md.
+  penpot-mcp-server:
+    image: "sebathi/penpot-mcp-docker:${PENPOT_MCP_IMAGE_TAG}"
+    restart: always
+    ports:
+      - "127.0.0.1:4401:4401"
+      - "127.0.0.1:4402:4402"
+    depends_on:
+      - penpot-frontend
+    networks:
+      - penpot
+    environment:
+      MULTI_USER: "true"
+      # bind inside the container so the 127.0.0.1 host port mapping can reach it.
+      # public exposure is prevented by the host binding above, not by this value.
+      PENPOT_MCP_SERVER_LISTEN_ADDRESS: "0.0.0.0"
+      # hostname the ai client uses to reach the server. for the tailscale pilot
+      # this is the tailnet hostname of the vps. set in .env.
+      PENPOT_MCP_SERVER_ADDRESS: "${PENPOT_MCP_SERVER_ADDRESS}"
+      PENPOT_MCP_SERVER_PORT: "4401"
+      PENPOT_MCP_WEBSOCKET_PORT: "4402"
+      PENPOT_MCP_LOG_LEVEL: "info"
