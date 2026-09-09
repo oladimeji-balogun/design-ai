@@ -10,10 +10,14 @@
 #   penpot-exporter  -> render/export service
 #   penpot-postgres  -> penpot's database
 #   penpot-redis     -> penpot's own cache/queue
-#   penpot-mcp-server-> mcp bridge in multi-user mode (4401 http, 4402 websocket)
+#   penpot-mcp-server-> mcp bridge, single-user remote mode. built from source
+#                       (infra/mcp/Dockerfile). serves the mcp server (4401 http),
+#                       the websocket bridge (4402), AND the plugin web server
+#                       (4400) that hands the plugin manifest to the browser.
 #
-# note: the plugin side is not a container. each designer loads the plugin into
-# their own browser from penpot; this stack only runs the server it connects to.
+# note: the designer still loads the plugin into their own browser, but the
+# manifest it loads (http://<host>:4400/manifest.json) is served BY this stack,
+# by the penpot-mcp-server container.
 
 networks:
   penpot:
@@ -25,7 +29,10 @@ volumes:
 
 services:
   penpot-frontend:
-    image: penpotapp/frontend:latest
+    # pinned to match the mcp image tag. the mcp plugin warns on a version
+    # mismatch between the mcp server and penpot, so frontend/backend/exporter
+    # and the mcp image must all be the same version. see PENPOT_VERSION in .env.
+    image: "penpotapp/frontend:${PENPOT_VERSION}"
     restart: always
     # bind to localhost only. tailscale (host) is the access path, not public 0.0.0.0.
     ports:
@@ -41,7 +48,7 @@ services:
       PENPOT_FLAGS: "$PENPOT_FLAGS"
 
   penpot-backend:
-    image: penpotapp/backend:latest
+    image: "penpotapp/backend:${PENPOT_VERSION}"
     restart: always
     volumes:
       - penpot_assets_data:/opt/data/assets
@@ -63,11 +70,14 @@ services:
       PENPOT_TELEMETRY_ENABLED: "false"
 
   penpot-exporter:
-    image: penpotapp/exporter:latest
+    image: "penpotapp/exporter:${PENPOT_VERSION}"
     restart: always
     networks:
       - penpot
     environment:
+      # the exporter requires the same secret key as the backend, penpot 2.x
+      # fails to boot without it (malli "missing-key" on :secret-key).
+      PENPOT_SECRET_KEY: "$PENPOT_SECRET_KEY"
       PENPOT_PUBLIC_URI: "http://penpot-frontend:8080"
       PENPOT_REDIS_URI: "redis://penpot-redis/0"
 
@@ -92,26 +102,41 @@ services:
       - penpot
 
   # the mcp bridge. this is the official penpot mcp server, packaged as a docker
-  # image built from the penpot/penpot source (mcp/ dir). we do not run it via a
-  # raw `npx` in a bare node image, that is not a proven container entrypoint.
+  # built from source (infra/mcp/Dockerfile) rather than the community
+  # sebathi/penpot-mcp-docker image. reason: the sebathi image only runs the mcp
+  # server (4401) + websocket bridge (4402); it does NOT serve the browser plugin
+  # on 4400. without the plugin server there is no manifest.json URL to load into
+  # penpot's plugins dialog, so the bridge can never connect. building the
+  # official penpot mcp workspace (penpot/penpot mcp/ at the matching tag) runs
+  # BOTH the mcp server and the plugin server, which is what the pipeline needs.
   #
-  # the image tag MUST match the penpot version, and penpot must be >= 2.13.1
-  # (the first release that shipped mcp). pin PENPOT_MCP_IMAGE_TAG in .env.
+  # ports:
+  #   4400 plugin web server (serves manifest.json to the browser)
+  #   4401 mcp http/sse endpoint (ai client connects here)
+  #   4402 websocket bridge (browser plugin connects here)
   #
-  # exposes 4401 (http/mcp for the ai client) and 4402 (websocket for the browser
-  # plugin bridge). there is no separate "plugin server" container, the plugin
-  # side lives in penpot itself, loaded into the designer's browser.
+  # runs single-user remote mode. multi-user remote is still "in progress"
+  # upstream, so it's deliberately left off for the pilot -- see infra/README.md.
   #
-  # MULTI_USER=true enables multiple simultaneous sessions and auto-enables remote
-  # mode (which disables local filesystem access). this is what gives the designer
-  # and a tester day-one concurrency.
+  # bound to 127.0.0.1 on the host so nothing is exposed publicly; tailscale is
+  # the access path. see infra/README.md.
   #
-  # bound to 127.0.0.1 on the host so nothing is exposed publicly; tailscale is the
-  # access path. see infra/README.md.
+  # IMPORTANT (vps): the plugin bakes the websocket URL at BUILD time from
+  # PENPOT_MCP_SERVER_ADDRESS. building on localhost hard-codes ws://localhost:4402
+  # into the plugin, which a remote browser cannot reach. for the vps, rebuild the
+  # image with PENPOT_MCP_SERVER_ADDRESS set to the tailnet hostname (passed as a
+  # build arg), don't just set it at runtime. see infra/README.md.
   penpot-mcp-server:
-    image: "sebathi/penpot-mcp-docker:${PENPOT_MCP_IMAGE_TAG}"
+    build:
+      context: ./mcp
+      args:
+        # a real penpot/penpot git TAG (not an "mcp-prod-*" branch -- those don't
+        # exist). keep in lockstep with the penpotapp/* tags via PENPOT_VERSION.
+        PENPOT_TAG: "${PENPOT_VERSION}"
+    image: "design-ai/penpot-mcp:${PENPOT_VERSION}"
     restart: always
     ports:
+      - "127.0.0.1:4400:4400"
       - "127.0.0.1:4401:4401"
       - "127.0.0.1:4402:4402"
     depends_on:
@@ -119,12 +144,15 @@ services:
     networks:
       - penpot
     environment:
-      MULTI_USER: "true"
-      # bind inside the container so the 127.0.0.1 host port mapping can reach it.
-      # public exposure is prevented by the host binding above, not by this value.
+      # remote, single-user. remote mode disables server-side filesystem access.
+      PENPOT_MCP_REMOTE_MODE: "true"
+      # bind inside the container so the 127.0.0.1 host port mappings can reach
+      # the servers. public exposure is prevented by the host binding above.
       PENPOT_MCP_SERVER_LISTEN_ADDRESS: "0.0.0.0"
-      # hostname the ai client uses to reach the server. for the tailscale pilot
-      # this is the tailnet hostname of the vps. set in .env.
+      PENPOT_MCP_PLUGIN_SERVER_LISTEN_ADDRESS: "0.0.0.0"
+      # hostname baked into the plugin's ws:// url so the browser can reach the
+      # bridge. localhost locally; the tailnet hostname on the vps (and remember
+      # the build-time caveat above).
       PENPOT_MCP_SERVER_ADDRESS: "${PENPOT_MCP_SERVER_ADDRESS}"
       PENPOT_MCP_SERVER_PORT: "4401"
       PENPOT_MCP_WEBSOCKET_PORT: "4402"
