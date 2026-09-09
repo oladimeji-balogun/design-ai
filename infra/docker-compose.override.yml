@@ -1,0 +1,27 @@
+# local-run overrides. docker compose auto-merges this file on top of
+# docker-compose.yml when you run `docker compose up` from this directory.
+#
+# purpose: run the SAME stack on your mac before the vps exists, to validate the
+# images, version pinning, and mcp wiring. the base file targets the tailscale
+# vps (tailnet hostnames); this file swaps in localhost so nothing here needs the
+# vps or tailscale to run.
+#
+# to run WITHOUT these local overrides (i.e. the real vps deploy), either delete
+# this file on the vps or run:
+#   docker compose -f docker-compose.yml up -d
+# which ignores the override.
+#
+# note: this stack (the sebathi mcp image) does NOT serve the penpot plugin on
+# port 4400 -- it only runs the mcp server (4401), websocket bridge (4402), and
+# a repl (4403). how the plugin gets loaded into the browser is verified during
+# the local run (task: see infra/README.md "plugin loading").
+
+services:
+  penpot-mcp-server:
+    # for a local run the ai client reaches the server at localhost, not a
+    # tailnet hostname.
+    environment:
+      PENPOT_MCP_SERVER_ADDRESS: "localhost"
+    # expose the repl port locally for debugging. bound to localhost only.
+    ports:
+      - "127.0.0.1:4403:4403"
