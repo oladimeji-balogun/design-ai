@@ -29,11 +29,22 @@ ARG NODE_IMAGE=node:22-slim
 # a real penpot/penpot tag. see VERSION PINNING above.
 ARG PENPOT_TAG=2.14.1
 
+# the websocket URL the browser plugin uses to reach the bridge. the plugin reads
+# process.env.WS_URI at BUILD time (vite define) -- NOT PENPOT_MCP_SERVER_ADDRESS,
+# despite the older assumption. must be reachable from the DESIGNER'S browser:
+#   local: http://localhost:4402
+#   vps:   http://<tailnet-host>:4402
+# defaults to localhost for local builds; the vps deploy passes the tailnet host.
+ARG WS_URI=http://localhost:4402
+
 # ---------------------------------------------------------------------------
 # builder: sparse-clone just mcp/, install, build (no start)
 # ---------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS builder
 ARG PENPOT_TAG
+# make WS_URI available to the plugin's vite build (it reads process.env.WS_URI).
+ARG WS_URI
+ENV WS_URI=${WS_URI}
 
 # git for the sparse clone; build tooling for native deps (sharp). corepack
 # provides the pnpm version the repo pins.
@@ -52,6 +63,25 @@ RUN git clone --branch "${PENPOT_TAG}" --depth 1 --filter=blob:none --sparse \
     && git sparse-checkout set mcp plugins
 
 WORKDIR /src/mcp
+
+# PATCH the plugin's vite config: upstream hardcodes `preview: { allowedHosts: [] }`,
+# which makes the plugin server (4400) reject any non-localhost Host header (e.g. a
+# tailnet hostname) with a 403 "host not allowed", and no env var can override a
+# hardcoded value. Rewrite it to read a comma-separated list from the
+# PENPOT_MCP_PLUGIN_ALLOWED_HOSTS env var at RUNTIME (empty -> defaults only, same
+# as before). This keeps the allowed host runtime-configurable (no rebuild to
+# change it). Fails the build loudly if the expected line isn't found (upstream
+# changed), so we don't silently ship a broken allowlist.
+RUN node -e ' \
+  const fs = require("fs"); \
+  const f = "packages/plugin/vite.config.ts"; \
+  let s = fs.readFileSync(f, "utf8"); \
+  const needle = "allowedHosts: []"; \
+  if (!s.includes(needle)) { console.error("PATCH FAILED: \"allowedHosts: []\" not found in " + f + " (upstream changed?)"); process.exit(1); } \
+  s = s.replace(needle, "allowedHosts: (process.env.PENPOT_MCP_PLUGIN_ALLOWED_HOSTS || \"\").split(\",\").map(x => x.trim()).filter(Boolean)"); \
+  fs.writeFileSync(f, s); \
+  console.log("Patched allowedHosts in " + f); \
+' && grep -n allowedHosts packages/plugin/vite.config.ts
 
 # install deps for all workspace packages (equivalent to ./scripts/setup).
 RUN pnpm -r install --frozen-lockfile
