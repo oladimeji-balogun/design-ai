@@ -91,8 +91,9 @@ Two helper scripts in `scripts/` do the fiddly parts. Recommended path:
      `http://your-vps.tailnet-name.ts.net:9001`
    - `PENPOT_VERSION`: a real Penpot release tag (>= `2.13.1`), e.g. `2.14.1`.
      Not an "mcp-prod-*" branch.
-   - `PENPOT_MCP_SERVER_ADDRESS`: the VPS tailnet **hostname** (no port). This is
-     baked into the plugin — it must be the tailnet host, never `localhost`.
+   - `PENPOT_MCP_SERVER_ADDRESS`: the VPS tailnet **hostname** (no port). Drives the
+     plugin's `WS_URI` (its bridge URL) — it must be the tailnet host, never
+     `localhost`, or a remote browser can't reach the bridge.
 
    `.env` is gitignored and must never be committed.
 
@@ -116,17 +117,34 @@ tailnet **only** — never on the public interface. `provision.sh` also sets a
 default-deny `ufw` firewall as defense in depth.
 
 We deliberately do NOT use `tailscale serve` (which fronts services as HTTPS on
-443 by path): the MCP plugin opens a direct `ws://<host>:4402` socket baked at
-build time, and the stack is intentionally http/ws, so serve's TLS/path model
-would cause mixed-content and port-vs-path failures. Raw tailnet ports are the fit.
+443 by path): the MCP plugin opens a direct `ws://<host>:4402` socket, and the
+stack is intentionally http/ws, so serve's TLS/path model would cause
+mixed-content and port-vs-path failures. Raw tailnet ports are the fit.
 
-### The build-time gotcha (read this)
+### The plugin WebSocket URL (read this)
 
-The plugin's WebSocket target (`ws://<PENPOT_MCP_SERVER_ADDRESS>:4402`) is compiled
-into the plugin at **build time**. If you ever change `PENPOT_MCP_SERVER_ADDRESS`,
-re-run `deploy.sh` — a plain restart will not update the baked URL. Building with
-`localhost` (e.g. copied from a local run) leaves the plugin unreachable from a
-remote browser. `deploy.sh` guards against the localhost case.
+The browser plugin connects to the bridge at the URL in `WS_URI`
+(`http://<PENPOT_MCP_SERVER_ADDRESS>:4402`). Two things make this subtle:
+
+- The plugin's `start` script **rebuilds the plugin on every container boot** and
+  reads `WS_URI` from the **runtime environment** (a vite `define`). So `WS_URI`
+  is set as a runtime env var in `docker-compose.yml`, NOT a Docker build arg — a
+  build arg is read in the wrong phase and gets overwritten by the boot rebuild.
+- Because it's runtime, changing `PENPOT_MCP_SERVER_ADDRESS` only needs a
+  **container recreate** (`deploy.sh`, or `docker compose up -d --force-recreate
+  penpot-mcp-server`), NOT a full image rebuild.
+
+The value must be reachable from the **designer's browser**. On the VPS that's the
+tailnet host; `localhost:4402` only works for a local run (there, "localhost" is
+the same machine as the browser). If the plugin shows "Connected" but tool calls
+report "no plugin connected," the plugin almost certainly baked `localhost` —
+check the running value:
+
+```bash
+docker compose -f docker-compose.yml exec penpot-mcp-server printenv WS_URI
+```
+
+`deploy.sh` guards against the `localhost` case on the VPS.
 
 ## First-time Penpot setup
 
@@ -184,9 +202,12 @@ Called out honestly so no one trusts these blind:
 - Multi-user remote. OPEN by choice: not enabled for the pilot because upstream
   multi-user remote is still in progress. Revisit with the `build:multi-user` /
   `start:multi-user` workspace variants when it stabilizes.
-- Plugin build-time address. GOTCHA: `PENPOT_MCP_SERVER_ADDRESS` is baked into the
-  plugin at build time (the plugin's `ws://` bridge URL). Build on the VPS with the
-  tailnet hostname; rebuild if it changes. See Deploy step 3.
+- Plugin WebSocket URL. GOTCHA: the plugin's `ws://` bridge URL comes from the
+  `WS_URI` runtime env var (derived from `PENPOT_MCP_SERVER_ADDRESS`), read when
+  the container's `start` script rebuilds the plugin on boot. It's runtime, not
+  build-time: changing the host needs a container recreate, not an image rebuild.
+  Must be the tailnet host (never `localhost`) on the VPS. See "The plugin
+  WebSocket URL" above.
 - Container start-up. NOTE: the MCP container runs `corepack` at start, which
   downloads the pinned `pnpm` on first boot (needs outbound network, adds a little
   latency). Fine for a VPS with internet; flag it if the box is network-restricted.

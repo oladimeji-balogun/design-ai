@@ -3,9 +3,11 @@
 # deploy.sh — build and run the design-ai stack on the VPS, over Tailscale.
 #
 # Handles the two things that are easy to get wrong by hand:
-#   1. The plugin's websocket URL is baked into the image at BUILD time from
-#      PENPOT_MCP_SERVER_ADDRESS. This script refuses to build unless that is the
-#      tailnet hostname (not localhost), and rebuilds so the value is fresh.
+#   1. The plugin's websocket URL comes from WS_URI (derived from
+#      PENPOT_MCP_SERVER_ADDRESS), read at container start when the plugin is
+#      rebuilt on boot. This script refuses to proceed unless that host is the
+#      tailnet hostname (not localhost), so the plugin is reachable from a
+#      remote browser. Applying a change is a recreate, not an image rebuild.
 #   2. Published ports must bind to the tailnet IP (not 127.0.0.1) to be reachable
 #      over Tailscale. This script sets TS_BIND from `tailscale ip -4` and selects
 #      the vps overlay, while NOT loading the localhost override.
@@ -43,7 +45,7 @@ envval() {
 PENPOT_MCP_SERVER_ADDRESS="$(envval PENPOT_MCP_SERVER_ADDRESS)"
 PENPOT_PUBLIC_URI="$(envval PENPOT_PUBLIC_URI)"
 
-# --- guard against the #1 footgun: plugin baked with the wrong host ---
+# --- guard against the #1 footgun: plugin pointed at the wrong host ---
 if [[ -z "${PENPOT_MCP_SERVER_ADDRESS:-}" || "${PENPOT_MCP_SERVER_ADDRESS}" == "localhost" ]]; then
   cat >&2 <<EOF
 ERROR: PENPOT_MCP_SERVER_ADDRESS is empty or 'localhost' in infra/.env.
@@ -51,15 +53,15 @@ ERROR: PENPOT_MCP_SERVER_ADDRESS is empty or 'localhost' in infra/.env.
 On the VPS this MUST be the box's tailnet hostname (no port), e.g.
   PENPOT_MCP_SERVER_ADDRESS=your-vps.tailnet-name.ts.net
 
-It is compiled into the browser plugin at build time; a remote browser
-cannot reach a plugin built for 'localhost'. Fix .env, then re-run.
+It becomes the browser plugin's WS_URI (bridge URL); a remote browser
+cannot reach a plugin pointed at 'localhost'. Fix .env, then re-run.
 
 Your tailnet hostname:
   $(tailscale status --json 2>/dev/null | grep -o '"DNSName":"[^"]*"' | head -1 | sed 's/.*:"//; s/\.$//' || echo '(run: tailscale status)')
 EOF
   exit 1
 fi
-echo "==> Plugin will be built for host: ${PENPOT_MCP_SERVER_ADDRESS}"
+echo "==> Plugin will connect the browser to host: ${PENPOT_MCP_SERVER_ADDRESS}:4402"
 
 # sanity: PENPOT_PUBLIC_URI should point at the same tailnet host on :9001
 if [[ "${PENPOT_PUBLIC_URI:-}" != *"${PENPOT_MCP_SERVER_ADDRESS}"* ]]; then
@@ -73,11 +75,16 @@ fi
 # bindings from loopback to the tailnet IP.
 COMPOSE_FILES=(-f docker-compose.yml)
 
-echo "==> Building MCP image (bakes ${PENPOT_MCP_SERVER_ADDRESS} into the plugin)"
+# build the MCP image if it doesn't exist yet (first deploy). WS_URI is applied
+# at container start (runtime), not here, so this build is only about the image
+# itself, not the plugin's ws target.
+echo "==> Building MCP image if needed"
 docker compose "${COMPOSE_FILES[@]}" build penpot-mcp-server
 
-echo "==> Starting the stack (ports bound to ${TS_BIND})"
-docker compose "${COMPOSE_FILES[@]}" up -d
+# --force-recreate ensures the container restarts with the current WS_URI so the
+# boot rebuild bakes the right host into the plugin, even if the image is cached.
+echo "==> Starting the stack (ports bound to ${TS_BIND}, WS_URI applied on recreate)"
+docker compose "${COMPOSE_FILES[@]}" up -d --force-recreate
 
 echo "==> Waiting for services to settle..."
 sleep 8
@@ -94,7 +101,8 @@ Register an AI client:
   claude mcp add penpot --transport http http://${PENPOT_MCP_SERVER_ADDRESS}:4401/mcp
 
 Notes:
-  - Use Firefox to load the plugin (Chromium blocks private-network access).
-  - If you change PENPOT_MCP_SERVER_ADDRESS later, re-run this script (rebuild
-    is required; a restart alone won't update the baked plugin URL).
+  - After (re)deploying, hard-refresh the Penpot tab so the browser loads the
+    freshly built plugin before clicking Connect.
+  - If you change PENPOT_MCP_SERVER_ADDRESS later, re-run this script. WS_URI is
+    runtime, so a container recreate applies it (no full image rebuild needed).
 EOF

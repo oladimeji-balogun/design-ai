@@ -135,9 +135,13 @@ the terminal, the design changes in the browser.
   frontend, backend, exporter, and the from-source MCP image. It must be a real
   `penpot/penpot` release tag (e.g. `2.14.1`), not an `mcp-prod-*` branch (those
   don't exist). A mismatch triggers an in-plugin warning.
-- Plugin build-time address: `PENPOT_MCP_SERVER_ADDRESS` is baked into the plugin
-  at BUILD time (it's the plugin's `ws://` bridge URL). On the VPS, build with the
-  tailnet hostname set; rebuild if it changes — a restart alone won't update it.
+- Plugin WebSocket URL: the plugin's `ws://` bridge URL comes from the `WS_URI`
+  runtime env var (derived from `PENPOT_MCP_SERVER_ADDRESS`). The container's
+  `start` script rebuilds the plugin on boot and reads `WS_URI` then, so it's a
+  runtime value, not a build arg. Changing the host needs a container recreate
+  (not an image rebuild). It must be reachable from the designer's browser: the
+  tailnet host on the VPS, `localhost` only for a local run. Symptom of getting it
+  wrong: plugin shows "Connected" but tool calls report "no plugin connected."
 - Container start-up: the MCP container runs `corepack` on start, which downloads
   the pinned pnpm on first boot (needs outbound network, adds a little latency).
 - Billing: Claude Code needs a paid plan (Pro/Max) or Anthropic API credits. The
