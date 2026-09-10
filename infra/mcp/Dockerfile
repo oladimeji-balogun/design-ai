@@ -29,22 +29,17 @@ ARG NODE_IMAGE=node:22-slim
 # a real penpot/penpot tag. see VERSION PINNING above.
 ARG PENPOT_TAG=2.14.1
 
-# the websocket URL the browser plugin uses to reach the bridge. the plugin reads
-# process.env.WS_URI at BUILD time (vite define) -- NOT PENPOT_MCP_SERVER_ADDRESS,
-# despite the older assumption. must be reachable from the DESIGNER'S browser:
-#   local: http://localhost:4402
-#   vps:   http://<tailnet-host>:4402
-# defaults to localhost for local builds; the vps deploy passes the tailnet host.
-ARG WS_URI=http://localhost:4402
+# NOTE on the websocket URL (WS_URI): the plugin's runtime `start` script rebuilds
+# the plugin on container boot and reads WS_URI from the RUNTIME environment, so
+# WS_URI is set in docker-compose.yml as a runtime env var, NOT baked here as a
+# build arg. (An earlier attempt to bake it at build time had no effect because
+# the boot rebuild overrides it.)
 
 # ---------------------------------------------------------------------------
 # builder: sparse-clone just mcp/, install, build (no start)
 # ---------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS builder
 ARG PENPOT_TAG
-# make WS_URI available to the plugin's vite build (it reads process.env.WS_URI).
-ARG WS_URI
-ENV WS_URI=${WS_URI}
 
 # git for the sparse clone; build tooling for native deps (sharp). corepack
 # provides the pnpm version the repo pins.
