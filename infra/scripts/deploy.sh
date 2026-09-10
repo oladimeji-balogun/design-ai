@@ -33,8 +33,15 @@ fi
 export HOST_BIND="${TS_BIND}"
 echo "==> Tailnet bind IP: ${TS_BIND} (ports bind here, reachable over tailnet only)"
 
-# load .env for validation (without leaking secrets to the log)
-set -a; . ./.env; set +a
+# read specific values from .env for validation WITHOUT sourcing the file.
+# sourcing would execute it, and values with unquoted spaces (e.g. PENPOT_FLAGS)
+# would be misread as commands. this reads only the keys we check.
+envval() {
+  # last matching KEY=VALUE wins; strips surrounding quotes; ignores comments.
+  grep -E "^${1}=" .env | tail -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+PENPOT_MCP_SERVER_ADDRESS="$(envval PENPOT_MCP_SERVER_ADDRESS)"
+PENPOT_PUBLIC_URI="$(envval PENPOT_PUBLIC_URI)"
 
 # --- guard against the #1 footgun: plugin baked with the wrong host ---
 if [[ -z "${PENPOT_MCP_SERVER_ADDRESS:-}" || "${PENPOT_MCP_SERVER_ADDRESS}" == "localhost" ]]; then
