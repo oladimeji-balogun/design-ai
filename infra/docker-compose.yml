@@ -123,11 +123,11 @@ services:
   # bound to 127.0.0.1 on the host so nothing is exposed publicly; tailscale is
   # the access path. see infra/README.md.
   #
-  # IMPORTANT (vps): the plugin bakes the websocket URL at BUILD time from
-  # PENPOT_MCP_SERVER_ADDRESS. building on localhost hard-codes ws://localhost:4402
-  # into the plugin, which a remote browser cannot reach. for the vps, rebuild the
-  # image with PENPOT_MCP_SERVER_ADDRESS set to the tailnet hostname (passed as a
-  # build arg), don't just set it at runtime. see infra/README.md.
+  # IMPORTANT (vps): the plugin's websocket target comes from the WS_URI env var,
+  # read by vite at container START (the `start` script rebuilds the plugin on
+  # boot). it must therefore be a RUNTIME env var, not a build arg -- see the
+  # environment block below. it must point at a host the DESIGNER'S BROWSER can
+  # reach: the tailnet host on the vps (localhost:4402 only works for a local run).
   penpot-mcp-server:
     build:
       context: ./mcp
@@ -135,12 +135,6 @@ services:
         # a real penpot/penpot git TAG (not an "mcp-prod-*" branch -- those don't
         # exist). keep in lockstep with the penpotapp/* tags via PENPOT_VERSION.
         PENPOT_TAG: "${PENPOT_VERSION}"
-        # websocket URL baked into the plugin at build time. the plugin reads
-        # WS_URI (NOT PENPOT_MCP_SERVER_ADDRESS). must be reachable from the
-        # designer's browser. defaults to localhost via ${..:-} for local builds;
-        # the vps deploy sets PENPOT_MCP_SERVER_ADDRESS so this becomes the tailnet
-        # host. rebuild required if the host changes.
-        WS_URI: "http://${PENPOT_MCP_SERVER_ADDRESS:-localhost}:4402"
     image: "design-ai/penpot-mcp:${PENPOT_VERSION}"
     restart: always
     # HOST_BIND defaults to loopback for local; the vps overlay sets it to the
@@ -154,6 +148,12 @@ services:
     networks:
       - penpot
     environment:
+      # websocket URL the browser plugin connects to. vite reads WS_URI at
+      # container start (the `start` script rebuilds the plugin on boot), so this
+      # is a RUNTIME var, not a build arg. must be reachable from the designer's
+      # BROWSER: on the vps that's the tailnet host; locally it's localhost.
+      # default keeps local runs working; the vps sets PENPOT_MCP_SERVER_ADDRESS.
+      WS_URI: "http://${PENPOT_MCP_SERVER_ADDRESS:-localhost}:4402"
       # remote, single-user. remote mode disables server-side filesystem access.
       PENPOT_MCP_REMOTE_MODE: "true"
       # bind inside the container so the 127.0.0.1 host port mappings can reach
