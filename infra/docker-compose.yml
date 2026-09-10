@@ -161,3 +161,9 @@ services:
       PENPOT_MCP_SERVER_PORT: "4401"
       PENPOT_MCP_WEBSOCKET_PORT: "4402"
       PENPOT_MCP_LOG_LEVEL: "info"
+      # the plugin's vite preview server (port 4400) rejects any Host header not
+      # in its allowlist ("Blocked request. This host is not allowed."). localhost
+      # + all IPs are allowed by default, but a tailnet hostname is not. add it via
+      # vite's documented env var. runtime-only (no rebuild needed on change).
+      # empty locally (localhost already allowed); set to the tailnet host on the vps.
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: "${PENPOT_MCP_SERVER_ADDRESS}"
