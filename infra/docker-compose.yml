@@ -135,6 +135,12 @@ services:
         # a real penpot/penpot git TAG (not an "mcp-prod-*" branch -- those don't
         # exist). keep in lockstep with the penpotapp/* tags via PENPOT_VERSION.
         PENPOT_TAG: "${PENPOT_VERSION}"
+        # websocket URL baked into the plugin at build time. the plugin reads
+        # WS_URI (NOT PENPOT_MCP_SERVER_ADDRESS). must be reachable from the
+        # designer's browser. defaults to localhost via ${..:-} for local builds;
+        # the vps deploy sets PENPOT_MCP_SERVER_ADDRESS so this becomes the tailnet
+        # host. rebuild required if the host changes.
+        WS_URI: "http://${PENPOT_MCP_SERVER_ADDRESS:-localhost}:4402"
     image: "design-ai/penpot-mcp:${PENPOT_VERSION}"
     restart: always
     # HOST_BIND defaults to loopback for local; the vps overlay sets it to the
@@ -161,9 +167,9 @@ services:
       PENPOT_MCP_SERVER_PORT: "4401"
       PENPOT_MCP_WEBSOCKET_PORT: "4402"
       PENPOT_MCP_LOG_LEVEL: "info"
-      # the plugin's vite preview server (port 4400) rejects any Host header not
-      # in its allowlist ("Blocked request. This host is not allowed."). localhost
-      # + all IPs are allowed by default, but a tailnet hostname is not. add it via
-      # vite's documented env var. runtime-only (no rebuild needed on change).
-      # empty locally (localhost already allowed); set to the tailnet host on the vps.
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: "${PENPOT_MCP_SERVER_ADDRESS}"
+      # the plugin server (4400) otherwise rejects any Host not in its allowlist
+      # with a 403. upstream hardcodes `allowedHosts: []`; our Dockerfile patches
+      # the vite config to read this env var (comma-separated) at runtime. set it
+      # to the tailnet host on the vps; empty locally (localhost allowed by default).
+      # runtime-only: change + restart, no rebuild.
+      PENPOT_MCP_PLUGIN_ALLOWED_HOSTS: "${PENPOT_MCP_SERVER_ADDRESS}"
