@@ -34,9 +34,11 @@ services:
     # and the mcp image must all be the same version. see PENPOT_VERSION in .env.
     image: "penpotapp/frontend:${PENPOT_VERSION}"
     restart: always
-    # bind to localhost only. tailscale (host) is the access path, not public 0.0.0.0.
+    # host bind address. defaults to loopback (safe for local). on the vps, set
+    # HOST_BIND to the tailnet IP (100.x) so the port is reachable over the
+    # tailnet but not the public interface. see docker-compose.vps.yml.
     ports:
-      - "127.0.0.1:9001:8080"
+      - "${HOST_BIND:-127.0.0.1}:9001:8080"
     volumes:
       - penpot_assets_data:/opt/data/assets
     depends_on:
@@ -135,10 +137,12 @@ services:
         PENPOT_TAG: "${PENPOT_VERSION}"
     image: "design-ai/penpot-mcp:${PENPOT_VERSION}"
     restart: always
+    # HOST_BIND defaults to loopback for local; the vps overlay sets it to the
+    # tailnet IP so these are reachable over the tailnet only.
     ports:
-      - "127.0.0.1:4400:4400"
-      - "127.0.0.1:4401:4401"
-      - "127.0.0.1:4402:4402"
+      - "${HOST_BIND:-127.0.0.1}:4400:4400"
+      - "${HOST_BIND:-127.0.0.1}:4401:4401"
+      - "${HOST_BIND:-127.0.0.1}:4402:4402"
     depends_on:
       - penpot-frontend
     networks:
