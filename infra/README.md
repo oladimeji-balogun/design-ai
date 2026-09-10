@@ -72,50 +72,61 @@ values from `.env`.
 
 ## Deploy
 
-1. Copy this `infra/` directory to the VPS (or clone the repo there).
+Two helper scripts in `scripts/` do the fiddly parts. Recommended path:
 
-2. Create the real env file from the template and fill it in:
+1. Provision the box (fresh Ubuntu 22.04/24.04). Copies/clones the repo, then:
 
    ```bash
-   cp .env.example .env
+   sudo bash infra/scripts/provision.sh   # installs docker, compose, tailscale, ufw
+   sudo tailscale up                      # join the SAME tailnet as your other machines
+   tailscale status                       # note this box's tailnet hostname + IP
    ```
 
-   - `PENPOT_SECRET_KEY`: generate a long random value
+2. Create the env file and fill it in (`cd infra && cp .env.example .env`):
+
+   - `PENPOT_SECRET_KEY`: a long random value
      (`python3 -c "import secrets; print(secrets.token_urlsafe(64))"`)
    - `PENPOT_DATABASE_PASSWORD`: a strong generated password
    - `PENPOT_PUBLIC_URI`: the VPS tailnet URL, e.g.
      `http://your-vps.tailnet-name.ts.net:9001`
    - `PENPOT_VERSION`: a real Penpot release tag (>= `2.13.1`), e.g. `2.14.1`.
-     Drives the three `penpotapp/*` image tags and the git tag the MCP image is
-     built from. Not an "mcp-prod-*" branch.
-   - `PENPOT_MCP_SERVER_ADDRESS`: the VPS tailnet hostname (no port)
+     Not an "mcp-prod-*" branch.
+   - `PENPOT_MCP_SERVER_ADDRESS`: the VPS tailnet **hostname** (no port). This is
+     baked into the plugin — it must be the tailnet host, never `localhost`.
 
    `.env` is gitignored and must never be committed.
 
-3. Build and bring the stack up. The MCP image builds from source on first run
-   (a few minutes), and `PENPOT_MCP_SERVER_ADDRESS` is baked into the plugin at
-   **build time**, so it must be set before building on the VPS:
+3. Deploy:
 
    ```bash
-   docker compose build penpot-mcp-server   # bakes the tailnet host into the plugin
-   docker compose up -d
+   sudo bash scripts/deploy.sh
    ```
 
-   IMPORTANT: the plugin's WebSocket target (`ws://<PENPOT_MCP_SERVER_ADDRESS>:4402`)
-   is compiled into the plugin during the build. If you build with `localhost`
-   (e.g. copied from a local run) the remote browser cannot reach the bridge.
-   Always rebuild on the VPS with the tailnet hostname set. If you change
-   `PENPOT_MCP_SERVER_ADDRESS` later, rebuild — a restart alone won't update it.
+   The script: reads the tailnet IP, refuses to build if `PENPOT_MCP_SERVER_ADDRESS`
+   is missing/localhost, builds the MCP image (baking the tailnet host into the
+   plugin), binds published ports to the tailnet IP via `HOST_BIND`, and brings the
+   stack up. It prints the URLs and the `claude mcp add` command at the end.
 
-4. Confirm the services are healthy:
+### How the network binding works
 
-   ```bash
-   docker compose ps
-   docker compose logs penpot-mcp-server
-   ```
+The base compose binds published ports to `${HOST_BIND:-127.0.0.1}`. Locally that
+default keeps everything on loopback. On the VPS, `deploy.sh` sets `HOST_BIND` to
+the box's tailnet IP (`tailscale ip -4`), so the ports are reachable over the
+tailnet **only** — never on the public interface. `provision.sh` also sets a
+default-deny `ufw` firewall as defense in depth.
 
-All services bind to `127.0.0.1` on the VPS. Nothing is published to the public
-internet. Team members reach the box over Tailscale.
+We deliberately do NOT use `tailscale serve` (which fronts services as HTTPS on
+443 by path): the MCP plugin opens a direct `ws://<host>:4402` socket baked at
+build time, and the stack is intentionally http/ws, so serve's TLS/path model
+would cause mixed-content and port-vs-path failures. Raw tailnet ports are the fit.
+
+### The build-time gotcha (read this)
+
+The plugin's WebSocket target (`ws://<PENPOT_MCP_SERVER_ADDRESS>:4402`) is compiled
+into the plugin at **build time**. If you ever change `PENPOT_MCP_SERVER_ADDRESS`,
+re-run `deploy.sh` — a plain restart will not update the baked URL. Building with
+`localhost` (e.g. copied from a local run) leaves the plugin unreachable from a
+remote browser. `deploy.sh` guards against the localhost case.
 
 ## First-time Penpot setup
 
