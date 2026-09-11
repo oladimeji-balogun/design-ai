@@ -34,9 +34,9 @@ services:
     # and the mcp image must all be the same version. see PENPOT_VERSION in .env.
     image: "penpotapp/frontend:${PENPOT_VERSION}"
     restart: always
-    # host bind address. defaults to loopback (safe for local). on the vps, set
-    # HOST_BIND to the tailnet IP (100.x) so the port is reachable over the
-    # tailnet but not the public interface. see docker-compose.vps.yml.
+    # host bind address. defaults to loopback (safe for local). on the vps,
+    # scripts/deploy.sh sets HOST_BIND to the tailnet IP (100.x) so the port is
+    # reachable over the tailnet but not the public interface.
     ports:
       - "${HOST_BIND:-127.0.0.1}:9001:8080"
     volumes:
