@@ -50,6 +50,23 @@ These are real, verified behaviors, not guesses. Apply them proactively.
   computed width/position looks wrong, wait ~100ms and re-read before acting.
 - Some tool calls (export especially) occasionally need a longer in-call poll;
   a transient failure is often resolved by retrying, not by rebuilding.
+- `execute_code` calls frequently return a client-side error — "socket connection
+  closed unexpectedly" or "Task ... timed out after 30 seconds" — even though the
+  mutation actually landed server-side. **Do not blindly re-run the same mutating
+  code after either error.** Instead, re-read the affected property/shape first;
+  if the value already reflects the change, move on. Only re-run the mutation if
+  the re-read shows it didn't take. Re-running unconditionally risks double-effects
+  (e.g. appending the same child twice) for non-idempotent calls.
+- A freshly `appendChild`-ed shape's `parentX`/`parentY`/`x`/`y` can read as wildly
+  wrong (e.g. large negative numbers, or absolute `x`/`y` stuck at `0,0`) if you
+  read them immediately, even after a few hundred ms. If a child's exported
+  position looks broken, don't just wait longer — `remove()` and recreate it (or
+  simply re-append it); a fresh append with a normal wait resolves it reliably.
+- When chaining many mutating calls on a freshly created shape (add flex layout,
+  set gap, set padding, set fill, set radius, set shadow, ...), split them into
+  separate `execute_code` calls (one or two mutations each) rather than one large
+  sequential block. Large blocks are far more likely to hit the timeout above
+  partway through, leaving you unsure which steps actually landed.
 
 ### Text
 - `width`/`height` are read-only; use `resize(w, h)`, but note `resize` sets
@@ -57,6 +74,82 @@ These are real, verified behaviors, not guesses. Apply them proactively.
   should size to its content.
 - Font substitution in PNG exports (e.g. a serif look when you specified Inter) is
   an export-renderer artifact; the shape data still references the correct font.
+
+### Token application is fundamentally broken via the Plugin API — work around it
+Confirmed on Penpot 2.14.1, reproduced many different ways: **you cannot bind a
+design token to a shape through the Plugin API**, regardless of where the token
+comes from.
+- `shape.applyToken(token, props)` throws a generic `"check error"` every time,
+  for every token type and every property, even for a token that lives in the
+  *current file's own local* token set (not just tokens from a connected library).
+- `token.applyToShapes([shape], props)` and `token.applyToSelected(props)` never
+  throw, but they are silent no-ops — the shape's property does not change and
+  `shape.tokens` stays `{}`.
+- This means the whole `penpot.library.local.tokens` / `TokenSet.addToken` /
+  `shape.applyToken` pipeline described in the Penpot API docs does not actually
+  work end-to-end here. Don't spend time re-trying variations (undefined props,
+  `["all"]`, selecting the shape first, wrapping it in a board vs. page root —
+  all tried, all fail the same way).
+
+**Separately, tokens from a *connected shared library* (e.g. "Nehso Tokens") are
+not visible to `penpotUtils.findTokenByName`/`tokenOverview()` at all** — those
+utilities only see `penpot.library.local.tokens`. Read a connected library's
+tokens via `library.tokens.sets` directly (each `Library` object — including
+entries in `penpot.library.connected` — has a `.tokens.sets` you can walk).
+
+**The actual workaround — resolve values yourself, apply them directly:**
+1. Walk every set in the shared library's `.tokens.sets`, build a flat
+   `name -> token` map.
+2. Write your own recursive resolver that follows `"{token.name}"` reference
+   strings (in both plain string values and inside composite typography/shadow
+   objects) until it bottoms out at a literal value. Don't rely on the SDK's
+   `token.resolvedValue` for this — it returns an opaque ClojureScript persistent
+   data structure (`$arr$`/`$tail$`/...), not a plain JS value; `resolvedValueString`
+   gives a readable-but-not-machine-parseable Clojure map string. Resolving the
+   references yourself in plain JS is far more reliable.
+3. Apply the resolved value directly to the normal shape property: `fills =
+   [{fillColor: hex, fillOpacity}]`, `fontFamily`/`fontSize`/`fontWeight`/
+   `lineHeight`/`letterSpacing` on `Text`, `borderRadius = px`, `shadows = [...]`.
+   For colors given as `rgba(r,g,b,a)` strings (some semantic tokens, e.g.
+   overlays, are literal rgba, not hex), convert to `{fillColor: "#rrggbb",
+   fillOpacity: a}` — Penpot's `Color`/`Shadow.color` fields expect a hex `color`
+   string plus separate `opacity`, and silently drop the whole `shadows`/`fills`
+   assignment if you hand them a raw `rgba(...)` string instead.
+4. `Shadow` on a shape needs `style: "drop-shadow"|"inner-shadow"` (not just an
+   `inset` boolean) plus numeric `offsetX/offsetY/blur/spread`, but
+   `TokenSet.addToken({type:"shadow", ...})` itself expects the opposite —
+   **all-string** fields (`TokenShadowValueString`: `offsetX`, `blur`, etc. as
+   strings, `inset` as the *string* `"true"`/`"false"`) if you're populating a
+   token set for the human designer's benefit (see point 6).
+5. Typography composite values from the source token use singular keys
+   (`fontSize`, `fontFamily`) but `TokenSet.addToken({type:"typography", ...})`
+   / the resolved shape properties expect **plural** (`fontSizes`,
+   `fontFamilies`) plus `fontWeight` (singular) — remap keys, don't pass the
+   token's raw `value` object through unchanged.
+6. Optional but worth doing: still rebuild the token sets locally in
+   `penpot.library.local.tokens` (via `addSet`/`addToken`) using the *resolved*
+   values from step 2 (not the original `"{...}"` references — see next point).
+   This doesn't make programmatic `applyToken` work, but it puts real,
+   correctly-valued tokens in the file's Tokens panel for the human designer to
+   apply by hand later, which the interactive UI may handle fine even though the
+   plugin bridge can't.
+7. **Cross-set token references silently vanish.** If a token's value is a
+   reference (`"{other.set.token}"`) pointing at a token in a *different* set,
+   the moment that other set exists (even just created, even inactive), the
+   referencing token gets silently dropped from its set the next time you read
+   it back — no error, `addToken` reports success, but `set.tokens.length` comes
+   back short. Same-set self-references are fine. Fix: only ever call
+   `addToken` with fully **resolved literal values** (step 2), never with
+   `"{...}"` reference strings, when rebuilding sets locally.
+8. Populate one token set per `execute_code` call (create the set, add all its
+   tokens, done) rather than looping over many sets in one call — batching
+   multiple `addSet`+`addToken` sequences in a single call was observed to
+   silently drop entire sets (e.g. one run reported `created: 353, errors: 0`
+   yet only ~140 tokens actually persisted). One set per call, verify the count
+   before moving to the next, has been reliable.
+9. To trace which token a directly-set property came from (since there's no
+   live `shape.tokens` binding), tag it yourself:
+   `shape.setPluginData("token:fill", "color.semantic.primary.default")`.
 
 ## Project constraints
 
@@ -83,10 +176,15 @@ this library is connected to the working file before designing:
    (buttons, inputs, nav, modal, dropdown, etc.), find it and instantiate:
    `const c = lib.components.find(x => x.name === "Web Buttons"); const inst = c.instance();`
    Only hand-build primitives that genuinely don't exist as a component.
-2. **Apply tokens, don't hardcode values.** Use `applyToken` / reference tokens by
-   name for color, spacing, radius, shadow, and typography. Never paste a raw hex,
-   px, or shadow when a token exists. Prefer the **alias/semantic** tiers (they
-   carry intent) over Foundation raw values.
+2. **Apply tokens by resolved value, not by live binding — see the "Token
+   application is broken" gotcha below before you touch tokens at all.** In
+   short: `shape.applyToken(...)` / `token.applyToShapes(...)` /
+   `token.applyToSelected(...)` do not work in this environment, for any token
+   source. Resolve the token's value yourself and set the shape's normal
+   property (fills, fontFamily/fontSize/..., borderRadius, shadows) directly,
+   still choosing that value **by token name** (alias/semantic tier preferred)
+   rather than inventing one. Never paste an arbitrary raw hex/px/shadow that
+   doesn't trace back to a real token's resolved value.
 3. **Do not use the raw color assets** — they are filed under "Obsolete Colors".
    Colors come from tokens.
 4. Fonts are **Urbanist** (base) and **Mona Sans** (secondary). Never Inter/serif.
