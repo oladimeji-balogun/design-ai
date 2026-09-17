@@ -153,6 +153,82 @@ To confirm end-to-end, do the quick test in the **Designer Guide** (`DESIGNER-GU
 open a file, connect the plugin, and prompt "list the boards on this page". If it
 answers with what's on your canvas, everything works.
 
+---
+
+## Quick command reference (copy/paste)
+
+The exact terminal commands, in order. **Run all `claude mcp ...` and `curl` lines
+in a PLAIN terminal — NOT inside a `claude` chat session.** (If you see the Claude
+chat prompt, type `/exit` first. `claude mcp add` is a shell command, not something
+you type to the AI — a very easy mistake.)
+
+### First-time setup (run once)
+```bash
+# tools
+brew install --cask claude-code
+brew install tailscale
+brew install --cask firefox        # recommended browser
+
+# join the private network (sign in as your @gurbee.com account)
+sudo tailscale up
+tailscale status | grep nehso      # should list: nehso-design-ai
+
+# get the project folder (ask Oladimeji for the repo URL if this fails)
+git clone https://github.com/oladimeji-balogun/design-ai.git
+cd design-ai
+
+# register the design server with Claude Code (from inside the project folder)
+claude mcp add penpot-vps --transport http http://nehso-design-ai.tailcb21c6.ts.net:4401/mcp
+```
+
+### Every work session
+```bash
+# 1. make sure the private network is up and the server is reachable
+sudo tailscale up
+curl -s -o /dev/null -w "%{http_code}\n" http://nehso-design-ai.tailcb21c6.ts.net:4401/mcp
+#    -> must print 406 (server alive & reachable). if it hangs/errors, Tailscale
+#       isn't connected — re-run: sudo tailscale logout && sudo tailscale up
+
+# 2. launch Claude Code FROM the project folder (so it loads the server + CLAUDE.md)
+cd ~/design-ai
+claude
+#    then inside Claude, type:  /mcp
+#    -> penpot-vps should show "connected · 4 tools"  (NOT 0 tools)
+```
+Then in **Firefox**: open Penpot, switch to the **Evyanna** team, open a file in
+**NELO Screens**, press **Cmd+Alt+P**, paste the plugin URL
+`http://nehso-design-ai.tailcb21c6.ts.net:4400/manifest.json`, Install → open →
+**Connect**, and keep that tab active. Now prompt in Claude:
+`list the boards on this page`.
+
+### If something's wrong (in order)
+```bash
+# A) server unreachable / curl doesn't return 406  -> Tailscale problem
+sudo tailscale logout
+sudo tailscale up                  # sign in as @gurbee.com
+tailscale status | grep nehso
+
+# B) /mcp shows penpot-vps with 0 tools (or missing)  -> re-register cleanly
+#    (plain terminal, in the project folder, NOT inside claude)
+cd ~/design-ai
+claude mcp remove penpot-vps 2>/dev/null
+claude mcp add penpot-vps --transport http http://nehso-design-ai.tailcb21c6.ts.net:4401/mcp
+claude mcp list                    # re-checks health outside a session
+#    then relaunch: claude  ->  /mcp
+
+# C) plugin says "Connected" but Claude says "no plugin connected"
+#    -> the Penpot browser tab went to sleep. Bring it to the front,
+#       reopen the plugin panel, click Connect again, keep the tab active.
+```
+
+Golden rules that trip people up:
+- `claude mcp ...` commands run in the **plain terminal**, never inside a Claude chat.
+- Always launch `claude` from the **`design-ai` folder** (that's where the server
+  registration and the `CLAUDE.md` house-rules live).
+- The **first `curl` returning 406** is the fast check that the network + server are
+  fine — if that works, any remaining issue is on the Claude/browser side, not the VPS.
+- Keep the **Penpot tab active** while working, or the plugin connection drops.
+
 ## Troubleshooting quick reference
 
 - **`/mcp` doesn't show penpot-vps** → you launched `claude` from the wrong folder,
